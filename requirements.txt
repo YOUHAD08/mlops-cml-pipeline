@@ -1,0 +1,11 @@
+# ML
+scikit-learn==1.5.2
+numpy==2.0.1
+matplotlib==3.9.2
+joblib==1.4.2
+
+# Config
+pyyaml==6.0.2
+
+# Testing
+pytest==8.3.2
