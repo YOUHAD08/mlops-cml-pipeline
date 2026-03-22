@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.pyc
+*.pyd
+.venv/
+.env
+venv/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Data & artifacts (not tracked by Git → DVC later!)
+data/
+artifacts/
+logs/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# VS Code
+.vscode/
+
+# pytest
+.pytest_cache/
