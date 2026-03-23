@@ -1,0 +1,228 @@
+name: mlops-cml-pipeline
+
+on:
+  pull_request:
+    branches: ["main"]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  # ================================
+  # JOB 1: Matrix Training + Eval
+  # ================================
+  train-eval-matrix:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        n_estimators: [100, 200, 400]
+    env:
+      N_ESTIMATORS: ${{ matrix.n_estimators }}
+      SEED: 42
+
+    steps:
+      # 1. Get code
+      - uses: actions/checkout@v4
+
+      # 2. Setup Python
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # 3. Cache pip (faster CI!)
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+          restore-keys: ${{ runner.os }}-pip-
+
+      # 4. Install dependencies
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # 5. Run tests first!
+      - name: Run tests
+        run: |
+          pytest -q
+
+      # 6. Train + Evaluate
+      - name: Train + Evaluate
+        run: |
+          python scripts/train.py | tee artifacts/train.log
+          python scripts/evaluate.py
+
+      # 7. Save artifacts per matrix config
+      - name: Save artifacts (per matrix)
+        run: |
+          mkdir -p artifacts_matrix/${{ matrix.n_estimators }}
+          cp artifacts/metrics.json artifacts_matrix/${{ matrix.n_estimators }}/metrics.json
+          cp artifacts/run_meta.json artifacts_matrix/${{ matrix.n_estimators }}/run_meta.json
+
+      # 8. Upload artifacts
+      - name: Upload artifacts (matrix)
+        uses: actions/upload-artifact@v4
+        with:
+          name: matrix-artifacts-${{ matrix.n_estimators }}
+          path: artifacts_matrix/${{ matrix.n_estimators }}
+
+  # ================================
+  # JOB 2: Summarize + CML Report
+  # ================================
+  summarize-and-comment:
+    needs: [train-eval-matrix]
+    runs-on: ubuntu-latest
+
+    steps:
+      # 1. Get code
+      - uses: actions/checkout@v4
+
+      # 2. Setup Python
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # 3. Cache pip
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+          restore-keys: ${{ runner.os }}-pip-
+
+      # 4. Install dependencies
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      # 5. Download ALL matrix artifacts
+      - name: Download matrix artifacts (100)
+        uses: actions/download-artifact@v4
+        with:
+          name: matrix-artifacts-100
+          path: artifacts_matrix/100
+
+      - name: Download matrix artifacts (200)
+        uses: actions/download-artifact@v4
+        with:
+          name: matrix-artifacts-200
+          path: artifacts_matrix/200
+
+      - name: Download matrix artifacts (400)
+        uses: actions/download-artifact@v4
+        with:
+          name: matrix-artifacts-400
+          path: artifacts_matrix/400
+
+      # 6. Aggregate metrics
+      - name: Aggregate metrics
+        run: |
+          python - <<'PY'
+          import json, glob, os
+          from pathlib import Path
+
+          # Read all metrics files
+          rows = []
+          for p in sorted(glob.glob("artifacts_matrix/*/metrics.json")):
+              with open(p, "r", encoding="utf-8") as f:
+                  m = json.load(f)
+              n = int(Path(p).parts[1])
+              rows.append({
+                  "n_estimators": n,
+                  "accuracy": m["accuracy"],
+                  "f1": m["f1"]
+              })
+
+          # Calculate averages
+          acc_avg = sum(r["accuracy"] for r in rows) / len(rows)
+          f1_avg  = sum(r["f1"] for r in rows) / len(rows)
+
+          # Get timing from run 200 if available
+          notes = {}
+          pick = "artifacts_matrix/200/run_meta.json"
+          if not os.path.exists(pick):
+              metas = glob.glob("artifacts_matrix/*/run_meta.json")
+              pick = metas[0] if metas else None
+          if pick:
+              with open(pick, "r", encoding="utf-8") as f:
+                  meta = json.load(f)
+              notes["train_seconds"] = meta.get("train_seconds", "n/a")
+
+          # Get eval_seconds
+          pickm = "artifacts_matrix/200/metrics.json"
+          if not os.path.exists(pickm):
+              ms = sorted(glob.glob("artifacts_matrix/*/metrics.json"))
+              pickm = ms[0] if ms else None
+          if pickm:
+              with open(pickm, "r", encoding="utf-8") as f:
+                  mm = json.load(f)
+              notes["eval_seconds"] = mm.get("eval_seconds", "n/a")
+
+          # Build final PR metrics
+          pr = {
+              "accuracy": round(float(acc_avg), 6),
+              "f1": round(float(f1_avg), 6),
+              "matrix": rows,
+              "notes": notes
+          }
+
+          Path("artifacts").mkdir(parents=True, exist_ok=True)
+          with open("artifacts/metrics_pr.json", "w", encoding="utf-8") as f:
+              json.dump(pr, f, indent=2)
+
+          print(f"Aggregated accuracy: {acc_avg:.6f}")
+          print(f"Aggregated f1: {f1_avg:.6f}")
+          PY
+
+      # 7. Get baseline from main
+      - name: Get baseline from main
+        run: |
+          mkdir -p artifacts
+          git fetch origin main --depth=1
+          if git show origin/main:artifacts/metrics.json > artifacts/baseline_metrics.json 2>/dev/null;
+          then
+            echo "Baseline found ✅"
+          else
+            echo "Baseline not found — first run!"
+          fi
+
+      # 8. Re-run for single figure
+      - name: Generate figure (n=200)
+        env:
+          N_ESTIMATORS: 200
+          SEED: 42
+        run: |
+          python scripts/train.py
+          python scripts/evaluate.py
+
+      # 9. Build report.md
+      - name: Build report
+        run: |
+          python scripts/make_report.py
+
+      # 10. Setup CML
+      - name: Setup CML
+        uses: iterative/setup-cml@v2
+
+      # 11. Post report on PR
+      - name: Comment report to PR
+        env:
+          REPO_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cml comment create report.md
+
+      # 12. Upload final artifacts
+      - name: Upload final artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: final-artifacts
+          path: |
+            artifacts/
+            report.md
