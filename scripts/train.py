@@ -1,3 +1,5 @@
+# Experiment: testing n_estimators=300 as new default
+
 import os
 import json
 import time
