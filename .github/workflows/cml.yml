@@ -2,7 +2,7 @@ name: mlops-cml-pipeline
 
 on:
   pull_request:
-    branches: ["main"]
+    branches: ["dev", "main"]
 
 permissions:
   contents: read
@@ -54,6 +54,7 @@ jobs:
       # 6. Train + Evaluate
       - name: Train + Evaluate
         run: |
+          mkdir -p artifacts
           python scripts/train.py | tee artifacts/train.log
           python scripts/evaluate.py
 

@@ -66,8 +66,15 @@ def main():
     baseline_path = Path("artifacts/baseline_metrics.json")
     base = None
     if baseline_path.exists():
-        with open(baseline_path, "r", encoding="utf-8") as f:
-            base = json.load(f)
+        try:
+            with open(baseline_path, "r", encoding="utf-8") as f:
+                content = f.read().strip()
+                if content:
+                    base = json.loads(content)
+                else:
+                    print("Baseline file is empty — skipping!")
+        except json.JSONDecodeError:
+            print("Baseline file is invalid JSON — skipping!")
 
     # 4. Extract notes + matrix
     notes = pr.get("notes", {})
